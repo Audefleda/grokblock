@@ -3,7 +3,8 @@
 #  grokblock.sh — Kombinierter Grok-Blocker fuer macOS
 #
 #  Blockiert:
-#    1. Zugriff auf die Grok-API (api.x.ai) via /etc/hosts + pf-Firewall
+#    1. Zugriff auf Grok-Dienste (api.x.ai, grok.com, www.grok.com,
+#       console.x.ai) via /etc/hosts + pf-Firewall
 #    2. Git-Clone des grok-frontend Repos via Git-Wrapper + Watcher-Daemon
 #
 #  Verwendung:
@@ -24,8 +25,8 @@ fi
 
 # === KONFIGURATION ==========================================================
 
-# Grok-API
-DOMAIN="api.x.ai"
+# Grok-Domains (alle zu blockierenden Hosts)
+DOMAINS="api.x.ai grok.com www.grok.com console.x.ai"
 HOSTS_FILE="/etc/hosts"
 PF_CONF="/etc/pf.conf"
 PF_ANCHOR_DIR="/etc/pf.anchors"
@@ -73,17 +74,18 @@ check_root() {
 # === HILFSFUNKTIONEN: Grok-API ==============================================
 
 resolve_ips() {
+    local domain="${1:-}"
     local ips=""
     if command -v dig &>/dev/null; then
-        ips=$(dig +short "$DOMAIN" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.' || true)
+        ips=$(dig +short "$domain" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.' || true)
     fi
     if [ -z "$ips" ] && command -v nslookup &>/dev/null; then
-        ips=$(nslookup "$DOMAIN" 8.8.8.8 2>/dev/null \
+        ips=$(nslookup "$domain" 8.8.8.8 2>/dev/null \
             | awk '/^Address: / {print $2}' \
             | grep -E '^[0-9]+\.' || true)
     fi
     if [ -z "$ips" ] && command -v host &>/dev/null; then
-        ips=$(host "$DOMAIN" 8.8.8.8 2>/dev/null \
+        ips=$(host "$domain" 8.8.8.8 2>/dev/null \
             | awk '/has address/ {print $4}' || true)
     fi
     echo "$ips"
@@ -116,7 +118,7 @@ get_unique_patterns() {
 
 enable_grok_api_block() {
     echo ""
-    echo "━━━ Grok-API-Sperre aktivieren ━━━"
+    echo "━━━ Grok-Domains-Sperre aktivieren ━━━"
     echo ""
 
     # --- /etc/hosts ---
@@ -126,45 +128,44 @@ enable_grok_api_block() {
     else
         cp "$HOSTS_FILE" "${HOSTS_FILE}${BACKUP_SUFFIX}"
         print_info "Backup erstellt: ${HOSTS_FILE}${BACKUP_SUFFIX}"
-        cat >> "$HOSTS_FILE" <<EOF
-
-${MARKER_BEGIN}
-127.0.0.1   ${DOMAIN}
-0.0.0.0     ${DOMAIN}
-${MARKER_END}
-EOF
-        print_success "/etc/hosts: Eintraege fuer ${DOMAIN} hinzugefuegt."
+        {
+            echo ""
+            echo "${MARKER_BEGIN}"
+            for domain in $DOMAINS; do
+                echo "127.0.0.1   ${domain}"
+                echo "0.0.0.0     ${domain}"
+            done
+            echo "${MARKER_END}"
+        } >> "$HOSTS_FILE"
+        print_success "/etc/hosts: Eintraege fuer alle Grok-Domains hinzugefuegt."
     fi
 
     flush_dns
 
     # --- pf-Firewall ---
     print_info "pf-Firewall konfigurieren..."
-    local ips
-    ips=$(resolve_ips)
-
-    if [ -z "$ips" ]; then
-        print_warn "Konnte keine IP-Adressen fuer ${DOMAIN} aufloesen."
-        ips="UNRESOLVED"
-    else
-        print_info "Aufgeloeste IPs fuer ${DOMAIN}:"
-        echo "$ips" | while read -r ip; do echo "  -> $ip"; done
-    fi
-
     mkdir -p "$PF_ANCHOR_DIR"
 
     {
-        echo "# pf-Regeln zum Blockieren der Grok-API (${DOMAIN})"
+        echo "# pf-Regeln zum Blockieren von Grok-Diensten"
         echo "# Erstellt am: $(date)"
         echo ""
-        if [ "$ips" = "UNRESOLVED" ]; then
-            echo "block drop out quick proto tcp to ${DOMAIN} port {80, 443}"
+    } > "$PF_ANCHOR_FILE"
+
+    for domain in $DOMAINS; do
+        local domain_ips
+        domain_ips=$(resolve_ips "$domain")
+        if [ -z "$domain_ips" ]; then
+            print_warn "Konnte keine IP-Adressen fuer ${domain} aufloesen."
+            echo "block drop out quick proto tcp to ${domain} port {80, 443}" >> "$PF_ANCHOR_FILE"
         else
-            echo "$ips" | while read -r ip; do
-                [ -n "$ip" ] && echo "block drop out quick proto tcp to ${ip} port {80, 443}"
+            print_info "Aufgeloeste IPs fuer ${domain}:"
+            echo "$domain_ips" | while read -r ip; do
+                echo "  -> $ip"
+                echo "block drop out quick proto tcp to ${ip} port {80, 443}" >> "$PF_ANCHOR_FILE"
             done
         fi
-    } > "$PF_ANCHOR_FILE"
+    done
 
     print_info "Anchor-Datei erstellt: ${PF_ANCHOR_FILE}"
 
@@ -194,7 +195,7 @@ EOF
         exit 1
     fi
 
-    print_success "Grok-API-Sperre ist AKTIV."
+    print_success "Grok-Domains-Sperre ist AKTIV."
 }
 
 enable_git_block() {
@@ -359,7 +360,7 @@ EOF
 
 disable_grok_api_block() {
     echo ""
-    echo "━━━ Grok-API-Sperre deaktivieren ━━━"
+    echo "━━━ Grok-Domains-Sperre deaktivieren ━━━"
     echo ""
 
     # --- /etc/hosts ---
@@ -370,7 +371,7 @@ disable_grok_api_block() {
         sed -i '' -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$HOSTS_FILE"
         print_success "Eintraege aus /etc/hosts entfernt."
     else
-        print_warn "Keine Grok-API-Eintraege in /etc/hosts gefunden."
+        print_warn "Keine Grok-Eintraege in /etc/hosts gefunden."
     fi
 
     flush_dns
@@ -394,7 +395,7 @@ disable_grok_api_block() {
     print_info "pf-Firewall neu laden..."
     pfctl -f "$PF_CONF" 2>/dev/null || true
 
-    print_success "Grok-API-Sperre ist DEAKTIVIERT."
+    print_success "Grok-Domains-Sperre ist DEAKTIVIERT."
 }
 
 disable_git_block() {
@@ -448,9 +449,9 @@ do_status() {
     echo "  grokblock — Status"
     echo "======================================================="
 
-    # --- Grok-API ---
+    # --- Grok-Domains ---
     echo ""
-    echo "--- Grok-API-Sperre (${DOMAIN}) ---"
+    echo "--- Grok-Domains-Sperre ---"
     echo ""
 
     if grep -q "$MARKER_BEGIN" "$HOSTS_FILE"; then
@@ -477,12 +478,15 @@ do_status() {
     echo "  pf-Status: ${pf_status}"
 
     echo ""
-    echo -n "  Verbindungstest (curl https://${DOMAIN}): "
-    if curl -s --connect-timeout 3 "https://${DOMAIN}" &>/dev/null; then
-        echo -e "${RED}ERREICHBAR (Sperre nicht wirksam!)${NC}"
-    else
-        echo -e "${GREEN}NICHT ERREICHBAR (Sperre wirksam)${NC}"
-    fi
+    echo "  Verbindungstests:"
+    for domain in $DOMAINS; do
+        printf "    curl https://%-22s " "${domain}:"
+        if curl -s --connect-timeout 3 "https://${domain}" &>/dev/null; then
+            printf "${RED}ERREICHBAR (Sperre nicht wirksam!)${NC}\n"
+        else
+            printf "${GREEN}NICHT ERREICHBAR (Sperre wirksam)${NC}\n"
+        fi
+    done
 
     # --- Git-Blocker ---
     echo ""
@@ -537,17 +541,19 @@ do_test() {
     PASS=0
     FAIL=0
 
-    # --- Grok-API-Test ---
-    echo "--- Grok-API ---"
+    # --- Grok-Domains-Tests ---
+    echo "--- Grok-Domains ---"
     echo ""
-    print_info "Verbindungstest zu https://${DOMAIN} ..."
-    if curl -s --connect-timeout 3 "https://${DOMAIN}" &>/dev/null; then
-        print_error "API ERREICHBAR — Sperre nicht wirksam!"
-        FAIL=$((FAIL + 1))
-    else
-        print_success "API NICHT ERREICHBAR — Sperre wirksam."
-        PASS=$((PASS + 1))
-    fi
+    for domain in $DOMAINS; do
+        print_info "Verbindungstest zu https://${domain} ..."
+        if curl -s --connect-timeout 3 "https://${domain}" &>/dev/null; then
+            print_error "${domain} ERREICHBAR — Sperre nicht wirksam!"
+            FAIL=$((FAIL + 1))
+        else
+            print_success "${domain} NICHT ERREICHBAR — Sperre wirksam."
+            PASS=$((PASS + 1))
+        fi
+    done
 
     echo ""
 
@@ -600,7 +606,7 @@ usage() {
     echo "Verwendung: sudo $0 [OPTION]"
     echo ""
     echo "Optionen:"
-    echo "  --enable    Alle Sperren aktivieren (Grok-API + Git-Clone)"
+    echo "  --enable    Alle Sperren aktivieren (Grok-Domains + Git-Clone)"
     echo "  --disable   Alle Sperren aufheben"
     echo "  --status    Aktuellen Status anzeigen"
     echo "  --test      Tests ausfuehren"
@@ -623,8 +629,8 @@ case "${1:-}" in
         echo "======================================================="
         echo ""
         echo "  Installierte Komponenten:"
-        echo "    Grok-API:  /etc/hosts + pf-Firewall"
-        echo "    Git-Block: $GIT_WRAPPER, $GIT_WATCHER, $LAUNCH_PLIST"
+        echo "    Grok-Domains: /etc/hosts + pf-Firewall"
+        echo "    Git-Block:    $GIT_WRAPPER, $GIT_WATCHER, $LAUNCH_PLIST"
         echo ""
         echo "  Naechster Schritt:"
         echo "    sudo $0 --test"
